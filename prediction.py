@@ -192,50 +192,23 @@ def generate_coordinated_data(res_file,
         log_odds = sp.array(chrom_res_tab['BETA'])
         ps = sp.array(chrom_res_tab['P'])
         betas = sp.sign(log_odds) * stats.norm.ppf(ps/2.0)
+        positions = sp.array(chrom_d['positions'])
+        g_nts = sp.array(chrom_d['nts'])
+
+        assert sp.all(ss_sids==g_sids), 'Uncoordinated data'
 
 
-        if not sp.all(ss_sids==g_sids):
-            print 'Coordinating SNPs'
-            g_filter = sp.in1d(g_sids,ss_sids)
-            ss_filter = sp.in1d(ss_sids,g_sids)
-
-            #Order by SNP IDs
-            g_order = sp.argsort(g_sids)
-            ss_order = sp.argsort(ss_sids)
-
-            g_indices = []
-            for g_i in g_order:
-                if g_filter[g_i]:
-                    g_indices.append(g_i)
-    
-            ss_indices = []
-            for ss_i in ss_order:
-                if ss_filter[ss_i]:
-                    ss_indices.append(ss_i)
-
-            g_nts = chrom_d['nts']
-            snp_indices = chrom_d['snp_indices']
-            betas = sp.array(chrom_res_tab['BETA'])
-            assert not sp.any(sp.isnan(betas)) and not sp.any(sp.isinf(betas)), 'Some betas are inf or nan.'
-            
-            #Convert p-values to betas...FIXME
-
-            print 'Found %d SNPs present in both datasets'%(len(g_indices))
-
-            ok_nts = g_nts[g_indices]
-
-
-        #Resorting by position
-        positions = sp.array(chrom_d['positions'])[g_indices]
         order = sp.argsort(positions)
-        g_indices = list(sp.array(g_indices)[order])
-        ss_indices = list(sp.array(ss_indices)[order])
+        betas = betas[order]
+        log_odds = log_odds[order]
+        ps = ps[order]
+        sids = ss_sids[order]                 
         positions = positions[order]
-        nts = ok_nts[order]
+        nts = g_nts[order]
         
         #Parse SNPs
         snp_indices = sp.array(chrom_d['snp_indices'])
-        snp_indices = snp_indices[g_indices] #Pinpoint where the SNPs are in the file.
+        snp_indices = snp_indices[order] #Pinpoint where the SNPs are in the file.
         raw_snps, freqs = _parse_plink_snps_(genotype_file, snp_indices)
 #         mafs = sp.minimum(freqs,1-freqs)
         print 'raw_snps.shape=', raw_snps.shape
@@ -243,10 +216,6 @@ def generate_coordinated_data(res_file,
         snp_stds = sp.sqrt(2*freqs*(1-freqs)) #sp.std(raw_snps, 1) 
         snp_means = freqs*2 #sp.mean(raw_snps, 1)
 
-        betas = betas[ss_indices]
-        log_odds = log_odds[ss_indices]
-        ps = ps[ss_indices]
-        sids = ss_sids[ss_indices]                 
         
             
         
@@ -275,7 +244,7 @@ def generate_coordinated_data(res_file,
         ofg.create_dataset('ps', data=ps)
         ofg.create_dataset('positions', data=positions)
         ofg.create_dataset('nts', data=nts)
-        ofg.create_dataset('sids', data=sids)
+        ofg.create_dataset('sids', data=sp.array(sids.tolist()))
         ofg.create_dataset('betas', data=betas)
         ofg.create_dataset('log_odds', data=log_odds)
         ofg.create_dataset('log_odds_prs', data=rb_prs)
@@ -303,12 +272,13 @@ def generate_coordinated_data(res_file,
 def run_plink_log_reg_assoc(genot_file = '/Users/bjv/Dropbox/Cloud_folder/Data/bjarni_crohns/genoabc_maf0.05', 
                             indiv_filter_file = '/Users/bjv/Dropbox/Cloud_folder/Data/bjarni_crohns/predabc/train1',
                             phenot_file ='/Users/bjv/Dropbox/Cloud_folder/Data/bjarni_crohns/predabc/phenadj.pheno',
-                            out_file = '/Users/bjv/Dropbox/Cloud_folder/Data/bjarni_crohns/predabc/assoc_test'):
+                            out_file = '/Users/bjv/Dropbox/Cloud_folder/Data/bjarni_crohns/predabc/assoc_test',
+                            plink_path = '/Users/bjv/Dropbox/Cloud_folder/programs/plink1.9/plink'):
     """
     Perform GWAS on the set of individuals 
     """
     from subprocess import call
-    plink_path = './../../programs/plink1.9/plink' 
+    
     
     plink_args = ['--bfile',genot_file,
                   '--keep',indiv_filter_file,
