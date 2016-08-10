@@ -87,16 +87,20 @@ def summarize_accuracy(prs_files):
     true_phens = []
     prs_phens = []
     ldpred_phens = []
+    tp_prs_rs = []
+    tp_ldpred_rs = []
     for prsf in prs_files:
         if os.path.isfile(prsf):
             rt = pd.read_csv(prsf,skipinitialspace=True, index_col=False)
             true_phens.extend(rt['true_phens'])
             prs_phens.extend(rt['raw_effects_prs'])
             ldpred_phens.extend(rt['pval_derived_effects_prs'])
+            tp_prs_rs.append(sp.corrcoef(rt['true_phens'],rt['raw_effects_prs'])[0,1])
+            tp_ldpred_rs.append(sp.corrcoef(rt['true_phens'],rt['pval_derived_effects_prs'])[0,1])
 
 #     print true_phens
 #     print pred_phens
-    return (sp.corrcoef(true_phens,prs_phens)[0,1],sp.corrcoef(true_phens,ldpred_phens)[0,1])
+    return (sp.mean(tp_prs_rs),sp.mean(tp_ldpred_rs))
     
 
 def _get_chrom_dict_(loci, chromosomes):
