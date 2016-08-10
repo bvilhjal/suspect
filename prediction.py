@@ -3,17 +3,24 @@ Various prediction code... for now.
 """
 
 import sys
+import os
 import ldpred
+from ldpred import ld
+from ldpred import LDpred
+from ldpred import validate
 import scipy as sp
 from scipy import stats
 import pandas as pd
+import cPickle
 from plinkio import plinkfile
 import h5py
+import gzip
 
 
 def predict_chrons_disease(genot_file = '/Users/bjv/Dropbox/Cloud_folder/Data/bjarni_crohns/genoabc_maf0.05', 
                            phenot_file ='/Users/bjv/Dropbox/Cloud_folder/Data/bjarni_crohns/predabc/phenadj.pheno',
-                           res_dir = '/Users/bjv/Dropbox/Cloud_folder/Data/bjarni_crohns/predabc'):
+                           res_dir = '/Users/bjv/Dropbox/Cloud_folder/Data/bjarni_crohns/predabc',
+                           ld_radius=50, N=4100):
     """
     Prediction and validation for Doug Speed.
     
@@ -30,22 +37,32 @@ def predict_chrons_disease(genot_file = '/Users/bjv/Dropbox/Cloud_folder/Data/bj
     test_filter_files = [data_dir+'/predabc/test%d'%i for i in range(1,11)]
     #Iterate over train-test datasets to perform LDpred
     for i in range(10):
-        # - Calculate summary statistics...
-        print "Running LDpred on the %d'th train/test data set."%(i+1)
-        print "Performing PLINK GWAS"
-        run_plink_log_reg_assoc(genot_file=genot_file, indiv_filter_file=train_filter_files[i], phenot_file=phenot_file, 
-                                out_file = res_dir+'/assoc_test%d'%(i+1))
-        res_file = res_dir+'/assoc_test%d.qassoc'%(i+1)  
-        hdf5_filename = res_dir+'/coord_data%i.hdf5'%i
-       
-        
         # - Run LDpred on summary stats.. 
         #     1. Generate a coordinated data set.
-        generate_coordinated_data(res_file, phenot_file, genot_file, hdf5_filename)
+        coord_filename = res_dir+'/coord_data%i.hdf5'%i
+        if not os.path.isfile(coord_filename):
+            print "Performing PLINK GWAS"
+            # - Calculate summary statistics...
+            run_plink_log_reg_assoc(genot_file=genot_file, indiv_filter_file=train_filter_files[i], phenot_file=phenot_file, 
+                                    out_file = res_dir+'/assoc_test%d'%(i+1))
+            res_file = res_dir+'/assoc_test%d.qassoc'%(i+1)  
+            generate_coordinated_data(res_file, phenot_file, genot_file, coord_filename)
+
+        else:
+            print 'Coordinated file found at: %s'%coord_filename
         
-        #     2. Run LDpred
-        
+            #     2. Run LDpred
+        ld_file_prefix = res_dir+'/ld_tab%d'%(i+1)
+        out_file_prefix = res_dir + '/ldpred_res%d'%(i+1) 
+#         
+        print "Running LDpred on the %d'th train/test data set."%(i+1)
+        run_ldpred(coord_filename, ld_file_prefix, ld_radius, out_file_prefix, N, )
     
+        #     3. Validate predictions
+        snp_weights_prefix = out_file_prefix
+        out_file_prefix = res_dir + '/ldpred_prs%d'%(i+1) 
+        validate_pred(snp_weights_prefix, phenot_file, genot_file, test_filter_files[i], out_file_prefix)
+        
     #Summarize results
     
 
@@ -191,7 +208,8 @@ def generate_coordinated_data(res_file,
         
         log_odds = sp.array(chrom_res_tab['BETA'])
         ps = sp.array(chrom_res_tab['P'])
-        betas = sp.sign(log_odds) * stats.norm.ppf(ps/2.0)
+        ns = sp.array(chrom_res_tab['NMISS'])
+        betas = sp.sign(log_odds) * stats.norm.ppf(ps/2.0)/sp.sqrt(ns)
         positions = sp.array(chrom_d['positions'])
         g_nts = sp.array(chrom_d['nts'])
 
@@ -215,7 +233,7 @@ def generate_coordinated_data(res_file,
 
         snp_stds = sp.sqrt(2*freqs*(1-freqs)) #sp.std(raw_snps, 1) 
         snp_means = freqs*2 #sp.mean(raw_snps, 1)
-
+        print snp_stds, snp_means
         
             
         
@@ -293,5 +311,174 @@ def run_plink_log_reg_assoc(genot_file = '/Users/bjv/Dropbox/Cloud_folder/Data/b
     
 
         
+def run_ldpred(coord_file, ld_file_prefix, ld_radius, out_file_prefix, N, 
+               ps=[1,0.3,0.1,0.03,0.01,0.003,0.001], num_iter=50, h2=None, 
+               verbose=False):
+    local_ld_dict_file = '%s_ldradius%d.pickled.gz'%(ld_file_prefix, ld_radius)
+    
+    print """
+Note: For maximal accuracy all SNPs with LDpred weights should be included in the validation data set.
+If they are a subset of the validation data set, then we suggest recalculate LDpred for the overlapping SNPs. 
+"""
+    if not os.path.isfile(local_ld_dict_file):
+        df = h5py.File(coord_file)
+                 
+        chrom_ld_scores_dict = {}
+        chrom_ld_dict = {}
+        chrom_ref_ld_mats = {}
+        ld_score_sum = 0
+        num_snps = 0
+        print 'Calculating LD information w. radius %d'% ld_radius
+
+        cord_data_g = df['cord_data']
+
+        for chrom_str in cord_data_g.keys():
+            print 'Working on %s'%chrom_str
+            g = cord_data_g[chrom_str]
+            if 'raw_snps_ref' in g.keys():
+                raw_snps = g['raw_snps_ref'][...]
+                snp_stds = g['snp_stds_ref'][...]
+                snp_means = g['snp_means_ref'][...]
             
             
+            #Filter monomorphic SNPs
+            ok_snps_filter = snp_stds>0
+            ok_snps_filter = ok_snps_filter.flatten()
+            raw_snps = raw_snps[ok_snps_filter]
+            snp_means = snp_means[ok_snps_filter]
+            snp_stds = snp_stds[ok_snps_filter]
+
+            n_snps = len(raw_snps)
+            snp_means.shape = (n_snps,1)   
+            snp_stds.shape = (n_snps,1)   
+            
+            
+            # Normalize SNPs..
+            snps = sp.array((raw_snps - snp_means)/snp_stds,dtype='float32')
+            assert snps.shape==raw_snps.shape, 'Array Shape mismatch'
+            ret_dict = ld.get_LDpred_ld_tables(snps, ld_radius=ld_radius, ld_window_size=2*ld_radius)
+            chrom_ld_dict[chrom_str] = ret_dict['ld_dict']
+            chrom_ref_ld_mats[chrom_str] = ret_dict['ref_ld_matrices']
+            ld_scores = ret_dict['ld_scores']
+            chrom_ld_scores_dict[chrom_str] = {'ld_scores':ld_scores, 'avg_ld_score':sp.mean(ld_scores)}
+            ld_score_sum += sp.sum(ld_scores)
+            num_snps += n_snps
+        avg_gw_ld_score = ld_score_sum / float(num_snps)
+        ld_scores_dict = {'avg_gw_ld_score': avg_gw_ld_score, 'chrom_dict':chrom_ld_scores_dict}    
+        
+        print 'Done calculating the LD table and LD score, writing to file:', local_ld_dict_file
+        print 'Genome-wide average LD score was:', ld_scores_dict['avg_gw_ld_score']
+        ld_dict = {'ld_scores_dict':ld_scores_dict, 'chrom_ld_dict':chrom_ld_dict, 'chrom_ref_ld_mats':chrom_ref_ld_mats}
+        f = gzip.open(local_ld_dict_file, 'wb')
+        cPickle.dump(ld_dict, f, protocol=2)
+        f.close()
+        print 'LD information is now pickled.'
+    else:
+        print 'Loading LD information from file: %s'%local_ld_dict_file
+        f = gzip.open(local_ld_dict_file, 'r')
+        ld_dict = cPickle.load(f)
+        f.close()
+    LDpred.ldpred_genomewide(data_file=coord_file, out_file_prefix=out_file_prefix, ps=ps, ld_radius=ld_radius, 
+                      ld_dict = ld_dict, n=N, num_iter=num_iter, h2=h2, verbose=verbose)
+            
+
+
+def validate_pred(res_file_prefix, phenotype_file, val_gt_file, indiv_filter_file, out_file_prefix, 
+                  ps=[1,0.3,0.1,0.03,0.01,0.003,0.001], ts=[1,0.3,0.1,0.03,0.01,0.003,0.001], cov_file=None, res_format='LDPRED'):
+    """
+    Validation...
+    """
+    #Parse indiv filter
+    indiv_tab = pd.read_table(indiv_filter_file,delim_whitespace=True, header=None)
+    
+    
+
+    #Parse phenotypes FIXME!!
+    phen_tab = pd.read_table(phenotype_file,delim_whitespace=True, header=None)
+    iids = sp.array(indiv_tab[0])
+    phen_tab = phen_tab[phen_tab[0].isin(iids)]
+    
+    phen_map = {}
+    for i, r in phen_tab.iterrows():
+        phen_map[r[0]] = {'phen':float(r[2])}
+
+    iids = set(phen_map.keys())            
+    
+                        
+#     non_zero_chromosomes = set()
+
+    if cov_file is not None:
+        print 'Parsing additional covariates'
+        #FIXME parse using pandas!
+#         with open(cov_file,'r') as f:
+#             num_missing = 0
+#             for line in f:
+#                 l = line.split()
+#                 iid = l[0]
+#                 if iid in phen_map:
+#                     covariates = map(float,l[1:])
+#                     phen_map[iid]['covariates']=covariates
+#                 else:
+#                     num_missing +=1
+#             if num_missing>0:
+#                 print 'Unable to find %d iids in phen file!'%num_missing
+                    
+                    
+    
+    num_individs = len(phen_map)
+    assert num_individs>0, 'No phenotypes were found!' 
+    
+    if res_format=='LDPRED':
+        weights_file = '%s_LDpred-inf.txt'%(res_file_prefix)
+        if os.path.isfile(weights_file):
+            print ''
+            print 'Calculating LDpred-inf risk scores'
+            rs_id_map = validate.parse_ldpred_res(weights_file)       
+            out_file = '%s_LDpred-inf.txt'%(out_file_prefix)
+            validate.calc_risk_scores(val_gt_file, rs_id_map, phen_map, out_file=out_file, split_by_chrom=False, 
+                                      adjust_for_sex=False, adjust_for_covariates=False, 
+                                      adjust_for_pcs=False)        
+        
+        for p in ps:
+            weights_file = '%s_LDpred_p%0.4e.txt'%(res_file_prefix, p)
+            if os.path.isfile(weights_file):
+                print ''
+                print 'Calculating LDpred risk scores using p=%0.3e'%p
+                rs_id_map = validate.parse_ldpred_res(weights_file)       
+                out_file = '%s_LDpred_p%0.4e.txt'%(out_file_prefix, p)
+                validate.calc_risk_scores(val_gt_file, rs_id_map, phen_map, out_file=out_file, split_by_chrom=False, 
+                                      adjust_for_sex=False, adjust_for_covariates=False, 
+                                      adjust_for_pcs=False)        
+            
+        #Plot results?
+
+    elif res_format=='P+T':
+        weights_file = '%s_all_snps.txt'%(res_file_prefix)
+        if os.path.isfile(weights_file):
+            print ''
+            print 'Calculating risk scores using all SNPs'
+            rs_id_map = validate.parse_ldpred_res(weights_file)       
+            out_file = '%s_all_snps.txt'%(out_file_prefix)
+            validate.calc_risk_scores(val_gt_file, rs_id_map, phen_map, out_file=out_file, split_by_chrom=False, 
+                                      adjust_for_sex=False, adjust_for_covariates=False, 
+                                      adjust_for_pcs=False)        
+        
+        for p_thres in ts:
+            weights_file = '%s_P+T_p%0.4e.txt'%(res_file_prefix, p_thres)
+            print weights_file
+            if os.path.isfile(weights_file):
+                print ''
+                print 'Calculating P+T risk scores using p-value threshold of %0.3e'%p_thres
+                rs_id_map = validate.parse_pt_res(weights_file)       
+                out_file = '%s_P+T_p%0.4e.txt'%(out_file_prefix, p_thres)
+                validate.calc_risk_scores(val_gt_file, rs_id_map, phen_map, out_file=out_file, split_by_chrom=False, 
+                                          adjust_for_sex=False, adjust_for_covariates=False, 
+                                          adjust_for_pcs=False)            
+        #Plot results?
+    else:
+        raise NotImplementedError('Results file format missing or unknown: %s'%res_format)
+    
+    
+
+    
+    
