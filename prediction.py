@@ -98,8 +98,6 @@ def summarize_accuracy(prs_files):
             tp_prs_rs.append(sp.corrcoef(rt['true_phens'],rt['raw_effects_prs'])[0,1])
             tp_ldpred_rs.append(sp.corrcoef(rt['true_phens'],rt['pval_derived_effects_prs'])[0,1])
 
-#     print true_phens
-#     print pred_phens
     return (sp.mean(tp_prs_rs),sp.mean(tp_ldpred_rs))
     
 
